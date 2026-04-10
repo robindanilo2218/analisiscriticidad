@@ -19,16 +19,27 @@ async function arrancarSistema() {
     actualizarSelectoresGlobales(); actualizarSelectoresCostos(); actualizarSelectoresConexionCriticidad(); actualizarListasFiltrosSecundarios(); actualizarSelectoresArbol(); aplicarFiltro(); actualizarPreviewCriticidad(); renderizarTablaCriticidad();
 }
 
-// --- IMPORTAR/EXPORTAR SETTINGS ---
+// --- UTILIDADES ---
 function exportarConfiguracion() { let conf = { diccionario_nombres: diccionarioNombres, diccionario_campos: diccionarioCampos, diccionario_lineas: diccionarioLineas, tipo_cambio: obtenerTC() }; descargarArchivo(JSON.stringify(conf, null, 2), `configuracion_motor.json`, 'application/json'); }
 function importarConfiguracion(e) { let file = e.target.files[0]; if(!file) return; let reader = new FileReader(); reader.onload = function(ev) { try { let conf = JSON.parse(ev.target.result); if(conf.diccionario_nombres) { diccionarioNombres = conf.diccionario_nombres; guardarEstado('diccionario_nombres', diccionarioNombres); } if(conf.diccionario_campos) { diccionarioCampos = conf.diccionario_campos; guardarEstado('diccionario_campos', diccionarioCampos); } if(conf.diccionario_lineas) { diccionarioLineas = conf.diccionario_lineas; guardarEstado('diccionario_lineas', diccionarioLineas); } if(conf.tipo_cambio) { localStorage.setItem('tipo_cambio', conf.tipo_cambio); document.getElementById('inputTipoCambio').value = conf.tipo_cambio; } alert("¡Settings importados!"); arrancarSistema(); } catch(err) { alert("Error JSON"); } }; reader.readAsText(file); }
-
 function guardarTipoCambio() { let val = document.getElementById('inputTipoCambio').value; localStorage.setItem('tipo_cambio', val); }
 function obtenerTC() { let tc = parseFloat(document.getElementById('inputTipoCambio').value); return (tc && tc > 0) ? tc : 1; }
 function obtenerSimboloMoneda() { return obtenerTC() > 1 ? "USD $" : "Q"; }
 function limpiarFormato(llave, valor) { if (valor === undefined || valor === null) return ""; let v = String(valor).trim(); if (v === "") return ""; if (!isNaN(v) && !v.includes("/") && !v.includes(",")) return parseFloat(v); let esFecha = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(v); if (esFecha) return `${esFecha[3]}-${esFecha[2].padStart(2, '0')}-${esFecha[1].padStart(2, '0')}`; return v; }
 function parsearMoneda(v) { if (v === undefined || v === null) return 0; let s = String(v).replace(/[^0-9\.,-]/g, ''); if (s === '') return 0; let ld = s.lastIndexOf('.'); let lc = s.lastIndexOf(','); if (lc > ld) { s = s.replace(/\./g, ''); s = s.replace(',', '.'); } else if (ld > lc) { s = s.replace(/,/g, ''); } else if (lc > -1 && ld === -1) { s = s.replace(',', '.'); } let val = parseFloat(s); return isNaN(val) ? 0 : val; }
 function escaparRegExp(string) { return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
+
+function parsearDuracion(val) {
+    if (!val) return 0; let s = String(val).toLowerCase().trim(); if (s === "") return 0;
+    if (s.includes(':')) { let parts = s.replace(/[^0-9:]/g, '').split(':'); let h = parseInt(parts[0]) || 0; let m = parseInt(parts[1]) || 0; return h + (m / 60); }
+    if (s.includes('min') || (s.includes('m') && !s.includes('h'))) { let m = parseFloat(s.replace(/[^0-9\.]/g, '')); return m / 60; }
+    let num = parseFloat(s.replace(/[^0-9\.]/g, '')); return isNaN(num) ? 0 : num;
+}
+function formatoHorasMinutos(horasDecimales) {
+    if(isNaN(horasDecimales) || horasDecimales === 0) return "0m";
+    let h = Math.floor(horasDecimales); let m = Math.round((horasDecimales - h) * 60);
+    if (m === 60) { h += 1; m = 0; } if (h === 0) return `${m}m`; if (m === 0) return `${h}h`; return `${h}h ${m}m`;
+}
 
 function cambiarPestana(pestana) {
     ['panelDatos', 'panelDashboard', 'panelDatosCostos', 'panelCostos', 'panelJerarquia', 'panelCriticidad'].forEach(id => document.getElementById(id).style.display = 'none');
@@ -41,41 +52,39 @@ function cambiarPestana(pestana) {
 }
 
 // --- CRUD: AGREGAR/EDITAR REGISTRO ---
-let modoEdicionActivo = { base: null, filaObj: null };
+let modoEdicionActivo = { base: null, filaObj: null, idx: null };
 function abrirModalEdicion(tipoBase, idLocal = null) {
     let baseObj = tipoBase === 'mantenimiento' ? baseDeDatos : baseDeCostos;
     if (baseObj.length === 0 && idLocal === null) return alert("Base vacía. Agrega una columna primero en Settings o importa un archivo.");
     let fila = idLocal !== null ? (tipoBase === 'mantenimiento' ? datosFiltrados[idLocal] : costosFiltrados[idLocal]) : {};
-    modoEdicionActivo = { base: tipoBase, filaObj: fila };
+    let realIdx = -1; 
+    if(idLocal !== null) { realIdx = baseObj.indexOf(fila); if(realIdx === -1) return alert("Error ubicando registro."); }
+    modoEdicionActivo = { base: tipoBase, filaObj: {...fila}, idx: realIdx };
     let cols = Array.from(new Set(baseObj.flatMap(Object.keys))).sort();
-    if(cols.length===0 && idLocal===null) cols = ["Nueva_Columna"]; // Fallback if completely empty
-    let html = '';
-    cols.forEach(c => { let val = fila[c] || ''; html += `<div style="margin-bottom:5px;"><label style="font-size:11px; font-weight:bold;">${c}</label><input type="text" id="editRow_${c}" value="${String(val).replace(/"/g, '&quot;')}" style="width:100%; padding:4px;"></div>`; });
-    document.getElementById('contenedorCamposEdicion').innerHTML = html;
-    document.getElementById('tituloEdicionRegistro').innerText = idLocal !== null ? "✏️ Editar Registro" : "➕ Nuevo Registro";
-    document.getElementById('modalEdicionRegistro').showModal();
+    if(cols.length===0 && idLocal===null) cols = ["Nueva_Columna"];
+    let html = ''; cols.forEach(c => { let val = fila[c] || ''; html += `<div style="margin-bottom:5px;"><label style="font-size:11px; font-weight:bold;">${c}</label><input type="text" id="editRow_${c}" value="${String(val).replace(/"/g, '&quot;')}" style="width:100%; padding:4px;"></div>`; });
+    document.getElementById('contenedorCamposEdicion').innerHTML = html; document.getElementById('tituloEdicionRegistro').innerText = idLocal !== null ? "✏️ Editar Registro" : "➕ Nuevo Registro"; document.getElementById('modalEdicionRegistro').showModal();
 }
 function guardarEdicionRegistro() {
     let inputs = document.querySelectorAll('input[id^="editRow_"]');
-    let esNuevo = Object.keys(modoEdicionActivo.filaObj).length === 0;
+    let esNuevo = modoEdicionActivo.idx === -1;
     inputs.forEach(i => { let col = i.id.replace('editRow_', ''); modoEdicionActivo.filaObj[col] = i.value.trim(); });
     if(esNuevo) { if(modoEdicionActivo.base === 'mantenimiento') baseDeDatos.push(modoEdicionActivo.filaObj); else baseDeCostos.push(modoEdicionActivo.filaObj); }
+    else { if(modoEdicionActivo.base === 'mantenimiento') baseDeDatos[modoEdicionActivo.idx] = modoEdicionActivo.filaObj; else baseDeCostos[modoEdicionActivo.idx] = modoEdicionActivo.filaObj; }
     if (modoEdicionActivo.base === 'mantenimiento') guardarEstado('bd_industrial', baseDeDatos); else guardarEstado('bd_costos', baseDeCostos);
     document.getElementById('modalEdicionRegistro').close(); aplicarFiltro();
 }
 
-// --- LECTURA DE ARCHIVOS Y UPSERT ---
+// --- VISTA PREVIA Y UPSERT ---
 function leerArchivosParaMapeo() { const input = document.getElementById('archivosCsv'); if (!input.files.length) return alert("Selecciona archivo."); archivosTemporalesLeidos = []; reglasNormalizacion = {}; reglasCalculos = []; document.getElementById('listaCalculosActivos').innerHTML=''; let archivosProcesados = 0; const conjunto = new Set(); Array.from(input.files).forEach(archivo => { Papa.parse(archivo, { header: true, skipEmptyLines: true, complete: function(res) { archivosTemporalesLeidos.push(res.data); if (res.data.length > 0) Object.keys(res.data[0]).forEach(k => conjunto.add(k.trim())); archivosProcesados++; if (archivosProcesados === input.files.length) construirModalMapeo(Array.from(conjunto)); }}); }); }
 function construirModalMapeo(encabezados) { const cont = document.getElementById('contenedorMapeo'); cont.innerHTML = ''; const destino = document.getElementById('destinoImportacion').value; encabezados.sort().forEach((col, index) => { let sug = col; if (col.toLowerCase().includes('maquina') || col.toLowerCase().includes('máquina') || col.toLowerCase().includes('maquinaria')) sug = "Máquina Consolidada"; if (destino === 'costos' && (col.toLowerCase().includes('valor') || col.toLowerCase().includes('costo'))) sug = "Costo Total"; if (col.includes('[')) sug = "Aplicación / Falla Identificada"; let colEsc = col.replace(/"/g, '&quot;'); cont.innerHTML += `<div class="fila-mapeo" id="fila_${index}"><div style="width: 25%; font-weight: bold; word-break: break-all;">${col}</div><div style="width: 30%;"><input type="text" class="col-destino" id="map_${index}" data-original="${colEsc}" value="${sug}" style="width: 90%;" onkeyup="generarVistaPrevia()" onchange="generarVistaPrevia()"></div><div style="width: 15%; text-align: center;"><input type="checkbox" id="val_${index}" onchange="generarVistaPrevia()"></div><div style="width: 15%; text-align: center;"><input type="checkbox" id="importar_${index}" checked onchange="alternarColumnaIgnorada(${index})"></div><div style="width: 15%; text-align: center;"><button class="btn-chico" onclick="abrirModalNormalizar('${colEsc}')">✏️ Editar</button><span id="badge_norm_${index}" style="color: green; font-weight: bold;"></span></div></div>`; }); document.getElementById('modalMapeo').showModal(); generarVistaPrevia(); }
 function alternarColumnaIgnorada(index) { const ok = document.getElementById(`importar_${index}`).checked; const f = document.getElementById(`fila_${index}`); document.getElementById(`map_${index}`).disabled = !ok; document.getElementById(`val_${index}`).disabled = !ok; if (!ok) f.classList.add('ignorada'); else f.classList.remove('ignorada'); generarVistaPrevia(); }
 function cerrarModal() { document.getElementById('modalMapeo').close(); }
 
-// Modal Crear Columna
 function abrirModalAgregarColumna() { document.getElementById('addColNombre').value = ''; document.getElementById('addColValor').value = ''; document.getElementById('modalAgregarColumna').showModal(); }
 function ejecutarAgregarColumna() { const destino = document.getElementById('addColBase').value; const nombre = document.getElementById('addColNombre').value.trim(); const valDef = document.getElementById('addColValor').value.trim(); if(!nombre) return alert("Escribe un nombre."); if(destino === 'mantenimiento') { if(baseDeDatos.length===0) return alert("Base vacía."); baseDeDatos.forEach(f => f[nombre] = valDef); guardarEstado('bd_industrial', baseDeDatos); } else { if(baseDeCostos.length===0) return alert("Base vacía."); baseDeCostos.forEach(f => f[nombre] = valDef); guardarEstado('bd_costos', baseDeCostos); } document.getElementById('modalAgregarColumna').close(); actualizarSelectoresGlobales(); actualizarSelectoresCostos(); actualizarListasFiltrosSecundarios(); actualizarSelectoresArbol(); aplicarFiltro(); alert("¡Columna agregada!"); }
 function cerrarModalAgregarColumna() { document.getElementById('modalAgregarColumna').close(); }
 
-// Modales Estandarizar
 function abrirModalUnificarCampos() { pintarListaUnificacionCampos(); document.getElementById('modalUnificarCampos').showModal(); }
 function pintarListaUnificacionCampos() { const baseObj = document.getElementById('uniCampBaseSeleccionada').value === 'mantenimiento' ? baseDeDatos : baseDeCostos; const tbody = document.getElementById('listaUnificacionCampos'); tbody.innerHTML = ''; if (baseObj.length === 0) { tbody.innerHTML = '<tr><td colspan="2" style="text-align:center;">Base vacía.</td></tr>'; return; } const conj = new Set(); baseObj.forEach(f => Object.keys(f).forEach(llave => conj.add(llave))); Array.from(conj).sort().forEach((colCrudo, idx) => { let valEstandar = diccionarioCampos[colCrudo] || colCrudo; let esc = colCrudo.replace(/"/g, '&quot;'); tbody.innerHTML += `<tr><td style="padding: 5px;">${colCrudo}</td><td style="padding: 5px;"><input type="text" id="uniCamp_${idx}" data-crudo="${esc}" value="${valEstandar}" style="width: 95%; padding: 4px;"></td></tr>`; }); }
 function guardarUnificacionCampos() { document.querySelectorAll('input[id^="uniCamp_"]').forEach(input => { let crudo = input.getAttribute('data-crudo'); let estandar = input.value.trim(); if (estandar && estandar !== crudo) diccionarioCampos[crudo] = estandar; }); guardarEstado('diccionario_campos', diccionarioCampos); function renombrar(baseArray) { return baseArray.map(obj => { let newObj = {}; for (let key in obj) { let newKey = diccionarioCampos[key] || key; if(newObj[newKey] !== undefined) { let strE = String(newObj[newKey]); let strV = String(obj[key]); if(!strE.includes(strV) && strV.trim()!=="") newObj[newKey] = strE + " | " + strV; } else { newObj[newKey] = obj[key]; } } return newObj; }); } if (baseDeDatos.length > 0) { baseDeDatos = renombrar(baseDeDatos); guardarEstado('bd_industrial', baseDeDatos); } if (baseDeCostos.length > 0) { baseDeCostos = renombrar(baseDeCostos); guardarEstado('bd_costos', baseDeCostos); } document.getElementById('modalUnificarCampos').close(); actualizarSelectoresGlobales(); actualizarSelectoresCostos(); actualizarListasFiltrosSecundarios(); actualizarSelectoresArbol(); aplicarFiltro(); alert("¡Columnas unificadas!"); }
@@ -89,11 +98,11 @@ function cerrarModalUnificar() { document.getElementById('modalUnificar').close(
 
 function abrirModalCategorizar() { actualizarSelectorColumnasCategorizar(); document.getElementById('modalCategorizar').showModal(); }
 function actualizarSelectorColumnasCategorizar() { const baseObj = document.getElementById('catBaseSeleccionada').value === 'mantenimiento' ? baseDeDatos : baseDeCostos; if (baseObj.length === 0) { document.getElementById('catColumnaMaquinas').innerHTML = '<option value="">(Base vacía)</option>'; return; } const conj = new Set(); baseObj.forEach(f => Object.keys(f).forEach(llave => conj.add(llave))); const selector = document.getElementById('catColumnaMaquinas'); selector.innerHTML = ''; Array.from(conj).sort().forEach(col => { selector.innerHTML += `<option value="${col}">${col}</option>`; }); let ideal = Array.from(conj).find(c => c.toLowerCase().includes('maquina') || c.toLowerCase().includes('máquina')); if (ideal) selector.value = ideal; pintarListaCategorizacion(); }
-function pintarListaCategorizacion() { const baseObj = document.getElementById('catBaseSeleccionada').value === 'mantenimiento' ? baseDeDatos : baseDeCostos; const columna = document.getElementById('catColumnaMaquinas').value; const tbody = document.getElementById('listaCategorizacion'); tbody.innerHTML = ''; if(!columna) return; const unicas = new Set(); baseObj.forEach(f => { let maq = f[columna]; if(maq && String(maq).trim() !== "") unicas.add(String(maq).trim()); }); Array.from(unicas).sort().forEach((maq, idx) => { let val = diccionarioLineas[maq] || ""; let esc = maq.replace(/"/g, '&quot;'); tbody.innerHTML += `<tr><td style="padding: 5px; font-weight: bold;">${maq}</td><td style="padding: 5px;"><input type="text" id="catLine_${idx}" data-maquina="${esc}" value="${val}" style="width: 95%; padding: 4px;"></td></tr>`; }); }
+function pintarListaCategorizacion() { const baseObj = document.getElementById('catBaseSeleccionada').value === 'mantenimiento' ? baseDeDatos : baseDeCostos; const columna = document.getElementById('catColumnaMaquinas').value; const tbody = document.getElementById('listaCategorizacion'); tbody.innerHTML = ''; if(!columna) return; const unicas = new Set(); baseObj.forEach(f => { let maq = f[columna]; if(maq && String(maq).trim() !== "") unicas.add(String(maq).trim()); }); Array.from(unicas).sort().forEach((maq, idx) => { let val = diccionarioLineas[maq] || ""; let esc = maq.replace(/"/g, '&quot;'); tbody.innerHTML += `<tr><td style="padding: 5px; font-weight: bold;">${maq}</td><td style="padding: 5px;"><input type="text" id="catLine_${idx}" data-crudo="${esc}" value="${val}" style="width: 95%; padding: 4px;"></td></tr>`; }); }
 function guardarCategorizacion() { document.querySelectorAll('input[id^="catLine_"]').forEach(input => { let m = input.getAttribute('data-maquina'); let l = input.value.trim(); if (l) diccionarioLineas[m] = l; }); guardarEstado('diccionario_lineas', diccionarioLineas); [baseDeDatos, baseDeCostos].forEach(baseObj => { if(baseObj.length === 0) return; let columnas = Array.from(new Set(baseObj.flatMap(Object.keys))); let colMaq = columnas.find(c => c.toLowerCase().includes('maquina') || c.toLowerCase().includes('máquina')); if (colMaq) { baseObj.forEach(fila => { let m = fila[colMaq]; if (m && diccionarioLineas[m]) fila["Línea de Producción"] = diccionarioLineas[m]; }); } }); guardarEstado('bd_industrial', baseDeDatos); guardarEstado('bd_costos', baseDeCostos); document.getElementById('modalCategorizar').close(); actualizarSelectoresGlobales(); actualizarSelectoresCostos(); actualizarListasFiltrosSecundarios(); aplicarFiltro(); alert("¡Líneas asignadas!"); }
 function cerrarModalCategorizar() { document.getElementById('modalCategorizar').close(); }
 
-// Formularios Calculos
+// Fórmulas
 function abrirModalCalculo() { const o1=document.getElementById('calcOrigen1'); const o2=document.getElementById('calcOrigen2'); o1.innerHTML=''; o2.innerHTML=''; const r=extraerReglasDeUI(); const u=Array.from(new Set(Object.values(r.mapaDestinos))); if(u.length===0)return alert("Mapea columnas primero."); u.sort().forEach(c=>{o1.innerHTML+=`<option value="${c}">${c}</option>`; o2.innerHTML+=`<option value="${c}">${c}</option>`;}); cambiarFormularioCalculo(); document.getElementById('modalCalculado').showModal(); }
 function cambiarFormularioCalculo() { const t=document.getElementById('tipoCalculo').value; const c2=document.getElementById('contenedorOrigen2'); if(t==='tiempo_muerto'||t==='concatenar')c2.style.display='block'; else c2.style.display='none'; const n={"dia_semana":"Día de la Semana","mes_nombre":"Mes Texto","anio":"Año","tiempo_muerto":"Tiempo Muerto (Hrs)","concatenar":"Columna Unida"}; document.getElementById('calcDestino').value=n[t]; }
 function cerrarModalCalculo() { document.getElementById('modalCalculado').close(); }
@@ -101,11 +110,7 @@ function guardarCalculo() { const t=document.getElementById('tipoCalculo').value
 function borrarCalculo(i) { reglasCalculos.splice(i,1); pintarCalculosActivos(); generarVistaPrevia(); }
 function pintarCalculosActivos() { const d=document.getElementById('listaCalculosActivos'); d.innerHTML=''; if(reglasCalculos.length===0)d.innerHTML='<span style="color:#999; font-style:italic;">No hay cálculos.</span>'; reglasCalculos.forEach((r,i)=>{ d.innerHTML+=`<span style="background:#e6ffed; border:1px solid #b7eb8f; padding:4px 8px; border-radius:4px; display:inline-block; margin:3px; color:#389e0d; font-weight:bold;">ƒ ${r.destino} <button onclick="borrarCalculo(${i})" style="border:none; background:none; cursor:pointer; color:red;">✖</button></span>`; }); }
 
-function calcularDiferenciaHoras(inicio, fin) { 
-    function aMs(t) { let s = String(t).toLowerCase().trim().replace(/[^0-9:apm]/g, ''); if(!s) return null; let isPM = s.includes('p'); let isAM = s.includes('a'); let parts = s.replace(/[apm]/g, '').split(':'); let h = parseInt(parts[0]) || 0; let m = parseInt(parts[1]) || 0; if(isPM && h < 12) h += 12; if(isAM && h === 12) h = 0; return (h * 60) + m; } 
-    let mI = aMs(inicio); let mF = aMs(fin); if(mI === null || mF === null) return 0; if(mF < mI) mF += (24 * 60); let diffMinutos = mF - mI; return parseFloat((diffMinutos / 60).toFixed(2)); 
-}
-
+function calcularDiferenciaHoras(inicio, fin) { function aMs(t) { let s = String(t).toLowerCase().trim().replace(/[^0-9:apm]/g, ''); if(!s) return null; let isPM = s.includes('p'); let isAM = s.includes('a'); let parts = s.replace(/[apm]/g, '').split(':'); let h = parseInt(parts[0]) || 0; let m = parseInt(parts[1]) || 0; if(isPM && h < 12) h += 12; if(isAM && h === 12) h = 0; return (h * 60) + m; } let mI = aMs(inicio); let mF = aMs(fin); if(mI === null || mF === null) return 0; if(mF < mI) mF += (24 * 60); let diffMinutos = mF - mI; return parseFloat((diffMinutos / 60).toFixed(2)); }
 function abrirModalNormalizar(co) { columnaEnEdicionActual=co; document.getElementById('tituloColumnaNormalizar').innerText=co; document.getElementById('inputBuscar').value=''; document.getElementById('inputReemplazar').value=''; pintarReglasNormalizacion(); document.getElementById('modalNormalizar').showModal(); }
 function agregarReglaNormalizacion() { const b=document.getElementById('inputBuscar').value; const r=document.getElementById('inputReemplazar').value; if(!b)return; if(!reglasNormalizacion[columnaEnEdicionActual])reglasNormalizacion[columnaEnEdicionActual]=[]; reglasNormalizacion[columnaEnEdicionActual].push({buscar:b,reemplazar:r}); document.getElementById('inputBuscar').value=''; document.getElementById('inputReemplazar').value=''; pintarReglasNormalizacion(); }
 function eliminarReglaNormalizacion(i) { reglasNormalizacion[columnaEnEdicionActual].splice(i,1); pintarReglasNormalizacion(); }
@@ -170,6 +175,36 @@ function ejecutarImportacionConMapeo() {
     if (destino === 'mantenimiento') guardarEstado('bd_industrial', baseDestino); else guardarEstado('bd_costos', baseDestino);
     archivosTemporalesLeidos = []; reglasNormalizacion = {}; reglasCalculos = [];
     actualizarSelectoresGlobales(); actualizarSelectoresCostos(); actualizarSelectoresConexionCriticidad(); actualizarListasFiltrosSecundarios(); actualizarSelectoresArbol(); document.getElementById('archivosCsv').value = ""; cerrarModal(); aplicarFiltro();
+}
+
+// --- NUEVO: VALIDAR TIEMPOS ---
+function abrirModalValidarTiempos() {
+    const sel = document.getElementById('validadorColTM'); sel.innerHTML = '';
+    if(baseDeDatos.length > 0) {
+        const cols = Array.from(new Set(baseDeDatos.flatMap(Object.keys))).sort();
+        cols.forEach(c => sel.innerHTML += `<option value="${c}">${c}</option>`);
+        let ideal = cols.find(c => c.toLowerCase().includes('tiempo') || c.toLowerCase().includes('muerto') || c.toLowerCase().includes('paro'));
+        if(ideal) sel.value = ideal;
+    }
+    ejecutarValidacionTiempos(); document.getElementById('modalValidarTiempos').showModal();
+}
+function ejecutarValidacionTiempos() {
+    const col = document.getElementById('validadorColTM').value; const tbody = document.getElementById('listaErroresTiempos'); tbody.innerHTML = '';
+    if(!col || baseDeDatos.length === 0) return;
+    let errores = 0;
+    baseDeDatos.forEach((f, idx) => {
+        let v = f[col];
+        if(v && String(v).trim() !== "") {
+            let s = String(v).toLowerCase().trim(); let valNum = parsearDuracion(v);
+            let looksLikeZero = (s === '0' || s === '0:00' || s === '0.0' || s === '00:00');
+            if (valNum === 0 && !looksLikeZero) {
+                errores++; tbody.innerHTML += `<tr><td style="padding:4px;">Registro #${idx+1}</td><td style="padding:4px; color:red; font-weight:bold;">${v}</td><td style="padding:4px;"><button onclick="document.getElementById('modalValidarTiempos').close(); cambiarPestana('datos'); abrirModalEdicion('mantenimiento', ${idx})" class="btn-chico">✏️ Editar</button></td></tr>`;
+            } else if (valNum > 100) {
+                errores++; tbody.innerHTML += `<tr><td style="padding:4px;">Registro #${idx+1}</td><td style="padding:4px; color:orange; font-weight:bold;">${v} (Anormal: ${formatoHorasMinutos(valNum)})</td><td style="padding:4px;"><button onclick="document.getElementById('modalValidarTiempos').close(); cambiarPestana('datos'); abrirModalEdicion('mantenimiento', ${idx})" class="btn-chico">✏️ Editar</button></td></tr>`;
+            }
+        }
+    });
+    if(errores === 0) tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:10px; color:green; font-weight:bold;">✅ Todos los datos de tiempo en esta columna tienen formato válido.</td></tr>';
 }
 
 // --- FILTROS GLOBALES Y SECUNDARIOS ---
@@ -242,7 +277,7 @@ function aplicarFiltro() {
     if (document.getElementById('panelJerarquia').style.display === 'block') renderizarJerarquia();
 }
 
-// --- TABLAS DE DATOS CON EDICIÓN (CRUD) ---
+// --- TABLAS DE DATOS ---
 function renderizarTablaMto() {
     const cab = document.getElementById('cabeceraTabla'); const cue = document.getElementById('cuerpoTabla'); cab.innerHTML = ''; cue.innerHTML = ''; if (datosFiltrados.length === 0) { document.getElementById('contadorMto').innerText="0"; return; }
     let db = [...datosFiltrados]; let busq = document.getElementById('busquedaMto').value.toLowerCase().trim(); if (busq) db = db.filter(f => Object.values(f).some(v => String(v).toLowerCase().includes(busq)));
@@ -251,14 +286,8 @@ function renderizarTablaMto() {
     document.getElementById('contadorMto').innerText = db.length; if(db.length===0)return;
     const conj = new Set(); db.forEach(f => Object.keys(f).forEach(k => conj.add(k))); const cols = Array.from(conj); let trH = '<tr>'; cols.forEach(c => trH += `<th style="padding:5px;">${c}</th>`); cab.innerHTML = trH + '</tr>';
     const lim = Math.min(db.length, 500); let trB = ''; 
-    for (let i = 0; i < lim; i++) { 
-        let f = db[i]; let idxOriginal = datosFiltrados.indexOf(f);
-        trB += `<tr class="fila-editable" onclick="abrirModalEdicion('mantenimiento', ${idxOriginal})">`; 
-        cols.forEach(c => trB += `<td style="padding:4px;">${f[c] !== undefined ? f[c] : ''}</td>`); trB += '</tr>'; 
-    } 
-    cue.innerHTML = trB;
+    for (let i = 0; i < lim; i++) { let f = db[i]; let idxOriginal = baseDeDatos.indexOf(f); trB += `<tr class="fila-editable" onclick="abrirModalEdicion('mantenimiento', ${idxOriginal})">`; cols.forEach(c => trB += `<td style="padding:4px;">${f[c] !== undefined ? f[c] : ''}</td>`); trB += '</tr>'; } cue.innerHTML = trB;
 }
-
 function renderizarTablaCostos() {
     const cab = document.getElementById('cabeceraTablaCostos'); const cue = document.getElementById('cuerpoTablaCostosTabla'); cab.innerHTML = ''; cue.innerHTML = ''; if (costosFiltrados.length === 0) { document.getElementById('contadorCostosTabla').innerText="0"; return; }
     let db = [...costosFiltrados]; let busq = document.getElementById('busquedaCostos').value.toLowerCase().trim(); if (busq) db = db.filter(f => Object.values(f).some(v => String(v).toLowerCase().includes(busq)));
@@ -267,12 +296,7 @@ function renderizarTablaCostos() {
     document.getElementById('contadorCostosTabla').innerText = db.length; if(db.length===0)return;
     const conj = new Set(); db.forEach(f => Object.keys(f).forEach(k => conj.add(k))); const cols = Array.from(conj); let trH = '<tr>'; cols.forEach(c => trH += `<th style="padding:5px;">${c}</th>`); cab.innerHTML = trH + '</tr>';
     const lim = Math.min(db.length, 500); let trB = ''; 
-    for (let i = 0; i < lim; i++) { 
-        let f = db[i]; let idxOriginal = costosFiltrados.indexOf(f);
-        trB += `<tr class="fila-editable" onclick="abrirModalEdicion('costos', ${idxOriginal})">`; 
-        cols.forEach(c => trB += `<td style="padding:4px;">${f[c] !== undefined ? f[c] : ''}</td>`); trB += '</tr>'; 
-    } 
-    cue.innerHTML = trB;
+    for (let i = 0; i < lim; i++) { let f = db[i]; let idxOriginal = baseDeCostos.indexOf(f); trB += `<tr class="fila-editable" onclick="abrirModalEdicion('costos', ${idxOriginal})">`; cols.forEach(c => trB += `<td style="padding:4px;">${f[c] !== undefined ? f[c] : ''}</td>`); trB += '</tr>'; } cue.innerHTML = trB;
 }
 
 function calcularPercentil(arr, pct) { if(arr.length===0)return 0; const idx=(pct/100)*(arr.length-1); const b=Math.floor(idx); const a=Math.ceil(idx); return arr[b]+(idx-b)*(arr[a]-arr[b]); }
@@ -282,11 +306,7 @@ function renderizarDashboard() { const cont = document.getElementById('contenedo
 function renderizarDashboardCostos() { const colMaq = document.getElementById('costoColMaquina').value; const colN2 = document.getElementById('costoColNivel2').value; const colN3 = document.getElementById('costoColNivel3').value; const colVal = document.getElementById('costoColValor').value; const cue = document.getElementById('cuerpoTablaCostosDash'); cue.innerHTML = ''; const c1 = document.getElementById('costoFiltroCol1').value; const v1 = document.getElementById('costoFiltroVal1').value; const c2 = document.getElementById('costoFiltroCol2').value; const v2 = document.getElementById('costoFiltroVal2').value; const c3 = document.getElementById('costoFiltroCol3').value; const v3 = document.getElementById('costoFiltroVal3').value; let db = costosFiltrados; if (c1 && v1) db = db.filter(f => String(f[c1]).trim() === v1); if (c2 && v2) db = db.filter(f => String(f[c2]).trim() === v2); if (c3 && v3) db = db.filter(f => String(f[c3]).trim() === v3); document.getElementById('contadorCostosDash').innerText = db.length; document.getElementById('costoTotalGlobal').innerText = "0.00"; if (!colMaq || !colVal || db.length === 0) { document.getElementById('costoQ1').innerText="0"; document.getElementById('costoQ2').innerText="0"; document.getElementById('costoQ3').innerText="0"; document.querySelector('#tablaDesgloseCostos thead').innerHTML=""; return; } let tot = 0; const agr = {}; let tc = obtenerTC(); let sim = obtenerSimboloMoneda(); document.getElementById('simboloMonedaGlobal').innerText = sim; document.querySelectorAll('.simCosto').forEach(el => el.innerText = sim); db.forEach(f => { let m1 = f[colMaq] ? String(f[colMaq]).trim() : ""; if (m1 !== "") { let m2 = colN2 && f[colN2] ? String(f[colN2]).trim() : ""; let m3 = colN3 && f[colN3] ? String(f[colN3]).trim() : ""; let key = m1 + "|||" + m2 + "|||" + m3; let v = parsearMoneda(f[colVal]) / tc; agr[key] = (agr[key] || 0) + v; tot += v; } }); document.getElementById('costoTotalGlobal').innerText = tot.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2}); const dG = Object.keys(agr).map(k => ({ key: k, costo: agr[k] })).sort((a, b) => b.costo - a.costo); if (dG.length === 0) return; const sC = dG.map(d => d.costo).sort((a, b) => a - b); const q1 = calcularPercentil(sC, 25); const q2 = calcularPercentil(sC, 50); const q3 = calcularPercentil(sC, 75); document.getElementById('costoQ1').innerText = q1.toLocaleString('en-US', {maximumFractionDigits: 0}); document.getElementById('costoQ2').innerText = q2.toLocaleString('en-US', {maximumFractionDigits: 0}); document.getElementById('costoQ3').innerText = q3.toLocaleString('en-US', {maximumFractionDigits: 0}); let headH = `<tr><th style="padding: 8px; text-align: left;">${colMaq}</th>`; if(colN2) headH += `<th style="padding: 8px; text-align: left;">${colN2}</th>`; if(colN3) headH += `<th style="padding: 8px; text-align: left;">${colN3}</th>`; headH += `<th style="padding: 8px; text-align: right;">Costo Total</th><th style="padding: 8px; text-align: center;">% del Gasto</th></tr>`; document.querySelector('#tablaDesgloseCostos thead').innerHTML = headH; let h = ''; dG.forEach(i => { let parts = i.key.split('|||'); let pct = tot > 0 ? ((i.costo / tot) * 100).toFixed(1) : 0; let cBar = 'darkgreen'; if (i.costo >= q3) cBar = 'darkred'; else if (i.costo >= q2) cBar = 'darkorange'; else if (i.costo > q1) cBar = 'olive'; h += `<tr><td style="padding: 8px; font-weight:bold; color:#0050b3;">${parts[0]}</td>`; if(colN2) h += `<td style="padding: 8px; font-size:12px;">${parts[1]}</td>`; if(colN3) h += `<td style="padding: 8px; font-size:12px;">${parts[2]}</td>`; h += `<td style="padding: 8px; text-align: right; font-family: monospace; font-size:14px;">${sim} ${i.costo.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</td><td style="padding: 8px; text-align: center;"><div style="width:100%; background:#eee; border-radius:3px; overflow:hidden; position:relative;"><div style="width:${pct}%; background:${cBar}; height:18px;"></div><span style="position:absolute; top:1px; left:0; width:100%; font-size:11px; text-align:center; color: #fff; font-weight:bold; text-shadow: 1px 1px 2px #000;">${pct}%</span></div></td></tr>`; }); cue.innerHTML = h; }
 
 // --- ÁRBOL JERÁRQUICO (OLAP) ---
-function actualizarSelectoresArbol() {
-    function llenar(selId, baseObj, fallbackStr) { if(baseObj.length === 0) return; const c = new Set(); baseObj.forEach(f => Object.keys(f).forEach(k => c.add(k))); const sel = document.getElementById(selId); let val = sel.value; sel.innerHTML = '<option value="">-- No usar este nivel/campo --</option>'; Array.from(c).sort().forEach(col => sel.innerHTML += `<option value="${col}">${col}</option>`); if (val && Array.from(c).includes(val)) sel.value = val; else { let i = Array.from(c).find(x => x.toLowerCase().includes(fallbackStr)); if(i) sel.value = i; } }
-    const metrica = document.getElementById('arbolMetrica').value; const baseObj = metrica === 'costo' ? baseDeCostos : baseDeDatos;
-    llenar('arbolColL1', baseObj, 'línea'); llenar('arbolColL2', baseObj, 'maquina'); llenar('arbolColL3', baseObj, 'seccion'); llenar('arbolColL4', baseObj, 'aplicacion'); llenar('arbolColCosto', baseDeCostos, 'costo'); llenar('arbolColTM', baseDeDatos, 'tiempo muerto'); llenar('arbolColHRep', baseDeDatos, 'reporte'); llenar('arbolColHIni', baseDeDatos, 'inicio'); llenar('arbolColTecnico', baseDeDatos, 'tecnico'); llenar('arbolColTurno', baseDeDatos, 'turno'); renderizarBotoneraArbol();
-}
+function actualizarSelectoresArbol() { function llenar(selId, baseObj, fallbackStr) { if(baseObj.length === 0) return; const c = new Set(); baseObj.forEach(f => Object.keys(f).forEach(k => c.add(k))); const sel = document.getElementById(selId); let val = sel.value; sel.innerHTML = '<option value="">-- No usar este nivel/campo --</option>'; Array.from(c).sort().forEach(col => sel.innerHTML += `<option value="${col}">${col}</option>`); if (val && Array.from(c).includes(val)) sel.value = val; else { let i = Array.from(c).find(x => x.toLowerCase().includes(fallbackStr)); if(i) sel.value = i; } } const metrica = document.getElementById('arbolMetrica').value; const baseObj = metrica === 'costo' ? baseDeCostos : baseDeDatos; llenar('arbolColL1', baseObj, 'línea'); llenar('arbolColL2', baseObj, 'maquina'); llenar('arbolColL3', baseObj, 'seccion'); llenar('arbolColL4', baseObj, 'aplicacion'); llenar('arbolColCosto', baseDeCostos, 'costo'); llenar('arbolColTM', baseDeDatos, 'tiempo muerto'); llenar('arbolColHRep', baseDeDatos, 'reporte'); llenar('arbolColHIni', baseDeDatos, 'inicio'); llenar('arbolColTecnico', baseDeDatos, 'tecnico'); llenar('arbolColTurno', baseDeDatos, 'turno'); renderizarBotoneraArbol(); }
 function renderizarBotoneraArbol() {
     const metrica = document.getElementById('arbolMetrica').value; const colL1 = document.getElementById('arbolColL1').value; const bot = document.getElementById('arbolBotoneraLineas'); bot.innerHTML = '';
     let baseObj = metrica === 'costo' ? costosFiltrados : datosFiltrados;
@@ -299,8 +319,8 @@ function renderizarBotoneraArbol() {
     let totalGlobal = 0; let suffix = "";
     if(metrica === 'frecuencia') { totalGlobal = baseObj.length; suffix = "Fallos Totales"; }
     else if(metrica === 'costo') { let colCos = document.getElementById('arbolColCosto').value; let tc = obtenerTC(); if(colCos) baseObj.forEach(f => { totalGlobal += (parsearMoneda(f[colCos])/tc); }); suffix = obtenerSimboloMoneda(); totalGlobal = totalGlobal.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}); }
-    else if(metrica === 'tiempo_muerto') { let colTM = document.getElementById('arbolColTM').value; if(colTM) baseObj.forEach(f => { let v = f[colTM]; if(v) { let nv = parseFloat(String(v).replace(/[^0-9\.]/g, '')); if(!isNaN(nv)) totalGlobal += nv; } }); suffix = "Hrs Paro"; totalGlobal = totalGlobal.toFixed(1); }
-    else if(metrica === 'tiempo_atencion') { let cHRep = document.getElementById('arbolColHRep').value; let cHIni = document.getElementById('arbolColHIni').value; if(cHRep && cHIni) baseObj.forEach(f => { let hr = f[cHRep]; let hi = f[cHIni]; if(hr && hi) totalGlobal += calcularDiferenciaHoras(hr, hi); }); suffix = "Hrs Reacción"; totalGlobal = totalGlobal.toFixed(1); }
+    else if(metrica === 'tiempo_muerto') { let colTM = document.getElementById('arbolColTM').value; if(colTM) baseObj.forEach(f => { let v = f[colTM]; if(v) { totalGlobal += parsearDuracion(v); } }); suffix = " de Paro"; totalGlobal = formatoHorasMinutos(totalGlobal); }
+    else if(metrica === 'tiempo_atencion') { let cHRep = document.getElementById('arbolColHRep').value; let cHIni = document.getElementById('arbolColHIni').value; if(cHRep && cHIni) baseObj.forEach(f => { let hr = f[cHRep]; let hi = f[cHIni]; if(hr && hi) totalGlobal += calcularDiferenciaHoras(hr, hi); }); suffix = " de Reacción"; totalGlobal = formatoHorasMinutos(totalGlobal); }
     
     document.getElementById('arbolTotalGlobal').innerText = totalGlobal; document.getElementById('arbolSuffixGlobal').innerText = suffix;
 
@@ -316,8 +336,8 @@ function renderizarJerarquia() {
     let c1 = document.getElementById('olapFiltroCol1').value; let v1 = document.getElementById('olapFiltroVal1').value; let c2 = document.getElementById('olapFiltroCol2').value; let v2 = document.getElementById('olapFiltroVal2').value;
     if (c1 && v1) baseObj = baseObj.filter(f => String(f[c1]).trim() === v1); if (c2 && v2) baseObj = baseObj.filter(f => String(f[c2]).trim() === v2);
 
-    if(baseObj.length === 0) { contenedor.innerHTML = '<p style="color:#999;">No hay datos para mostrar con los filtros actuales.</p>'; return; }
-    if(!arbolLineaSeleccionada) { contenedor.innerHTML = '<p style="color:#999;">Selecciona una línea en la botonera de arriba.</p>'; return; }
+    if(baseObj.length === 0) { contenedor.innerHTML = '<p style="color:#999;">No hay datos.</p>'; return; }
+    if(!arbolLineaSeleccionada) { contenedor.innerHTML = '<p style="color:#999;">Selecciona una línea.</p>'; return; }
 
     const cL1 = document.getElementById('arbolColL1').value; const cL2 = document.getElementById('arbolColL2').value; const cL3 = document.getElementById('arbolColL3').value; const cL4 = document.getElementById('arbolColL4').value;
     let dbLinea = baseObj.filter(f => String(f[cL1]).trim() === arbolLineaSeleccionada);
@@ -325,17 +345,16 @@ function renderizarJerarquia() {
     let arbol = {};
     dbLinea.forEach(f => {
         let m = cL2 && f[cL2] ? String(f[cL2]).trim() : 'Máquina Única'; let s = cL3 && f[cL3] ? String(f[cL3]).trim() : 'Sección Única'; let a = cL4 && f[cL4] ? String(f[cL4]).trim() : 'Aplicación General';
-        if(!arbol[m]) arbol[m] = {}; if(!arbol[m][s]) arbol[m][s] = {}; if(!arbol[m][s][a]) arbol[m][s][a] = []; arbol[m][s][a].push(f);
+        if(!arbol[m]) arbol[m] = {}; if(!arbol[m][s]) arbol[m][s] = {}; if(!arbol[m][s][a]) arbol[m][s][a] = [];
+        arbol[m][s][a].push(f);
     });
 
     let html = '';
     Object.keys(arbol).sort().forEach(maq => {
         let filasMaq = []; Object.keys(arbol[maq]).forEach(sec => { Object.keys(arbol[maq][sec]).forEach(app => { filasMaq = filasMaq.concat(arbol[maq][sec][app]); }); });
         
-        // Integración Criticidad en OLAP
         let critBtn = ''; let objCrit = listaCriticidad.find(c => c.equipo === maq);
         if(objCrit) critBtn = `<span class="badge ${objCrit.badgeClase}" style="margin-left:10px;">${objCrit.nivel}</span> <button onclick="abrirEdicionCriticidadDirecta('${maq.replace(/'/g, "\\'")}')" class="btn-chico" style="margin-left:5px;">✏️ Ajustar Criticidad</button>`;
-        
         let tIdM = "tbl_" + Math.random().toString(36).substr(2,9);
         
         html += `<div class="caja-anidada nivel-maquina"><div class="caja-header" onclick="this.nextElementSibling.style.display = this.nextElementSibling.style.display==='none' ? 'block' : 'none'"><div class="tree-title-row"><span>⚙️ Máquina: <span style="color:#0ea5e9;">${maq}</span> ${critBtn}</span><div><span style="font-weight:normal; font-size:12px; margin-right:10px;">(${filasMaq.length} registros)</span> <span class="indicador-exp">🔽 Expandir</span></div></div>${generarHtmlStats(filasMaq, metrica)}</div><div class="caja-body" style="display:none;">`;
@@ -356,18 +375,13 @@ function renderizarJerarquia() {
 }
 
 function generarMiniTabla(filas, metrica) {
-    if(filas.length === 0) return '';
-    let cols = Array.from(new Set(filas.flatMap(Object.keys)));
+    if(filas.length === 0) return ''; let cols = Array.from(new Set(filas.flatMap(Object.keys)));
     let h = '<table border="1" style="white-space: nowrap; width: 100%; border-collapse: collapse; font-size:11px; background:#fff;"><thead style="background:#f1f5f9; position:sticky; top:0;"><tr>';
     cols.forEach(c => h += `<th style="padding:3px;">${c}</th>`); h += '</tr></thead><tbody>';
     filas.forEach(f => { 
-        let baseRef = metrica === 'costo' ? 'costos' : 'mantenimiento';
-        let mainArr = metrica === 'costo' ? costosFiltrados : datosFiltrados;
-        let idx = mainArr.indexOf(f); // Get index to allow edit
-        h += `<tr class="fila-editable" onclick="abrirModalEdicion('${baseRef}', ${idx})">`; 
-        cols.forEach(c => h += `<td style="padding:3px;">${f[c]!==undefined ? f[c] : ''}</td>`); h += '</tr>'; 
-    });
-    h += '</tbody></table>'; return h;
+        let baseRef = metrica === 'costo' ? 'costos' : 'mantenimiento'; let mainArr = metrica === 'costo' ? baseDeCostos : baseDeDatos; let idx = mainArr.indexOf(f);
+        h += `<tr class="fila-editable" onclick="abrirModalEdicion('${baseRef}', ${idx})">`; cols.forEach(c => h += `<td style="padding:3px;">${f[c]!==undefined ? f[c] : ''}</td>`); h += '</tr>'; 
+    }); h += '</tbody></table>'; return h;
 }
 
 function generarHtmlStats(filas, metrica) {
@@ -385,21 +399,21 @@ function generarHtmlStats(filas, metrica) {
         dataArray = Object.values(pC).sort((a,b)=>a-b); if(dataArray.length===0) dataArray=[0];
     }
     else if (metrica === 'tiempo_muerto') {
-        let colTM = document.getElementById('arbolColTM').value; let colFec = document.getElementById('selectorColumnaFecha').value; isTiempo = true; suffix = " Hrs"; let pT = {};
-        filas.forEach(f => { let d = f[colFec]; let v = f[colTM]; if(v) { let nv = parseFloat(String(v).replace(/[^0-9\.]/g, '')); if(!isNaN(nv)){ sumaTotal+=nv; if(d) { let fs = String(d); let key = ""; if(agrupacion==='dia') key=fs; else if(agrupacion==='mes') key=fs.substring(0,7); else if(agrupacion==='anio') key=fs.substring(0,4); else if(agrupacion==='semana') { let td = new Date(fs+"T12:00:00"); key = td.getFullYear()+"-"+Math.floor(td.getTime()/604800000); } if(key) pT[key] = (pT[key] || 0) + nv; } } } });
+        let colTM = document.getElementById('arbolColTM').value; let colFec = document.getElementById('selectorColumnaFecha').value; isTiempo = true; let pT = {};
+        filas.forEach(f => { let d = f[colFec]; let v = f[colTM]; if(v) { let nv = parsearDuracion(v); if(nv > 0 || String(v).trim()==='0') { sumaTotal+=nv; if(d) { let fs = String(d); let key = ""; if(agrupacion==='dia') key=fs; else if(agrupacion==='mes') key=fs.substring(0,7); else if(agrupacion==='anio') key=fs.substring(0,4); else if(agrupacion==='semana') { let td = new Date(fs+"T12:00:00"); key = td.getFullYear()+"-"+Math.floor(td.getTime()/604800000); } if(key) pT[key] = (pT[key] || 0) + nv; } } } });
         dataArray = Object.values(pT).sort((a,b)=>a-b); if(dataArray.length===0) dataArray=[0];
     }
     else if (metrica === 'tiempo_atencion') {
-        let cHRep = document.getElementById('arbolColHRep').value; let cHIni = document.getElementById('arbolColHIni').value; let colFec = document.getElementById('selectorColumnaFecha').value; isTiempo = true; suffix = " Hrs"; let pA = {};
+        let cHRep = document.getElementById('arbolColHRep').value; let cHIni = document.getElementById('arbolColHIni').value; let colFec = document.getElementById('selectorColumnaFecha').value; isTiempo = true; let pA = {};
         filas.forEach(f => { let hr = f[cHRep]; let hi = f[cHIni]; let d = f[colFec]; if(hr && hi) { let diff = calcularDiferenciaHoras(hr, hi); sumaTotal+=diff; if(d) { let fs = String(d); let key = ""; if(agrupacion==='dia') key=fs; else if(agrupacion==='mes') key=fs.substring(0,7); else if(agrupacion==='anio') key=fs.substring(0,4); else if(agrupacion==='semana') { let td = new Date(fs+"T12:00:00"); key = td.getFullYear()+"-"+Math.floor(td.getTime()/604800000); } if(key) pA[key] = (pA[key] || 0) + diff; } } });
         dataArray = Object.values(pA).sort((a,b)=>a-b); if(dataArray.length===0) dataArray=[0];
     }
 
     const q0 = dataArray[0]; const q4 = dataArray[dataArray.length-1]; const q1 = calcularPercentil(dataArray, 25); const q2 = calcularPercentil(dataArray, 50); const q3 = calcularPercentil(dataArray, 75); const avg = dataArray.reduce((a,b)=>a+b, 0) / dataArray.length;
-    let formatNum = (n) => { return isTiempo ? n.toFixed(1) : (metrica==='costo' ? n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}) : Math.round(n)); };
-    let formatTotal = (n) => { return metrica==='frecuencia' ? n : (metrica==='costo' ? n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}) : n.toFixed(1)); };
+    let formatNum = (n) => { return isTiempo ? formatoHorasMinutos(n) : (metrica==='costo' ? n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}) : Math.round(n)); };
+    let formatTotal = (n) => { return metrica==='frecuencia' ? n : (metrica==='costo' ? n.toLocaleString('en-US',{minimumFractionDigits:2, maximumFractionDigits:2}) : formatoHorasMinutos(n)); };
 
-    let htmlStats = `<div class="tree-stats-row"><span class="stats-badge stats-badge-avg" style="background:#e0f2fe; border-color:#3b82f6; color:#1e40af;"><b>TOTAL PERIODO GLOBAL:</b> ${prefix}${formatTotal(sumaTotal)}${metrica==='frecuencia'?' Fallos':suffix}</span><span class="stats-badge stats-badge-q">Min: ${prefix}${formatNum(q0)}${suffix}</span><span class="stats-badge stats-badge-q">Q1: ${prefix}${formatNum(q1)}</span><span class="stats-badge stats-badge-q">Mediana: ${prefix}${formatNum(q2)}</span><span class="stats-badge stats-badge-q">Q3: ${prefix}${formatNum(q3)}</span><span class="stats-badge stats-badge-q">Max: ${prefix}${formatNum(q4)}</span><span class="stats-badge stats-badge-avg">Prom: ${prefix}${formatNum(avg)}${suffix}</span></div>`;
+    let htmlStats = `<div class="tree-stats-row"><span class="stats-badge stats-badge-avg" style="background:#e0f2fe; border-color:#3b82f6; color:#1e40af;"><b>TOTAL CUMULADO:</b> ${prefix}${formatTotal(sumaTotal)}${metrica==='frecuencia'?' Fallos':''}</span><span class="stats-badge stats-badge-q" title="Mínimo">Min: ${prefix}${formatNum(q0)}${suffix}</span><span class="stats-badge stats-badge-q" title="Cuartil 1 (25%)">Q1: ${prefix}${formatNum(q1)}</span><span class="stats-badge stats-badge-q" title="Mediana (50%)">Mediana: ${prefix}${formatNum(q2)}</span><span class="stats-badge stats-badge-q" title="Cuartil 3 (75%)">Q3: ${prefix}${formatNum(q3)}</span><span class="stats-badge stats-badge-q" title="Máximo">Max: ${prefix}${formatNum(q4)}</span><span class="stats-badge stats-badge-avg" title="Promedio">Prom: ${prefix}${formatNum(avg)}${suffix}</span></div>`;
 
     if(metrica !== 'costo') {
         const colTec = document.getElementById('arbolColTecnico').value; const colTur = document.getElementById('arbolColTurno').value; let cTec={}; let cTur={};
@@ -411,26 +425,13 @@ function generarHtmlStats(filas, metrica) {
 }
 
 // --- CRITICIDAD ---
-function abrirEdicionCriticidadDirecta(maq) {
-    cambiarPestana('criticidad'); let obj = listaCriticidad.find(c => c.equipo === maq);
-    if(obj) {
-        document.getElementById('critEquipo').value = obj.equipo; document.getElementById('critFrec').value = obj.frec; document.getElementById('critImp').value = obj.imp; document.getElementById('critFlex').value = obj.flex; document.getElementById('critCosto').value = obj.costo; document.getElementById('critSeguridad').value = obj.seg;
-        actualizarPreviewCriticidad();
-    }
-}
+function abrirEdicionCriticidadDirecta(maq) { cambiarPestana('criticidad'); let obj = listaCriticidad.find(c => c.equipo === maq); if(obj) { document.getElementById('critEquipo').value = obj.equipo; document.getElementById('critFrec').value = obj.frec; document.getElementById('critImp').value = obj.imp; document.getElementById('critFlex').value = obj.flex; document.getElementById('critCosto').value = obj.costo; document.getElementById('critSeguridad').value = obj.seg; actualizarPreviewCriticidad(); } }
 function actualizarSelectoresConexionCriticidad() { const sB = document.getElementById('critColMto'); const sC = document.getElementById('critColBodega'); const sV = document.getElementById('critColValorBodega'); sB.innerHTML = '<option value="">-- Mto --</option>'; sC.innerHTML = '<option value="">-- Bodega --</option>'; sV.innerHTML = '<option value="">-- Costo Base --</option>'; if (baseDeDatos.length > 0) { let cM = new Set(); baseDeDatos.forEach(f => Object.keys(f).forEach(k => cM.add(k))); Array.from(cM).sort().forEach(c => sB.innerHTML += `<option value="${c}">${c}</option>`); let mId = Array.from(cM).find(c => c.toLowerCase() === 'línea de producción' || c.toLowerCase().includes('maquina') || c.toLowerCase().includes('máquina')); if(mId) sB.value = mId; } if (baseDeCostos.length > 0) { let cC = new Set(); baseDeCostos.forEach(f => Object.keys(f).forEach(k => cC.add(k))); Array.from(cC).sort().forEach(c => { sC.innerHTML += `<option value="${c}">${c}</option>`; sV.innerHTML += `<option value="${c}">${c}</option>`; }); let mId2 = Array.from(cC).find(c => c.toLowerCase() === 'línea de producción' || c.toLowerCase().includes('maquina') || c.toLowerCase().includes('máquina')); if(mId2) sC.value = mId2; let vId = Array.from(cC).find(c => c.toLowerCase().includes('costo') || c.toLowerCase().includes('valor')); if(vId) sV.value = vId; } llenarEquiposCriticidad(); }
 function llenarEquiposCriticidad() { const colMto = document.getElementById('critColMto').value; const colCos = document.getElementById('critColBodega').value; const sE = document.getElementById('critEquipoSelect'); sE.innerHTML = '<option value="">-- Seleccionar Equipo --</option>'; const unicas = new Set(); if(colMto && baseDeDatos.length>0) baseDeDatos.forEach(f => { let m = f[colMto]; if(m) unicas.add(String(m).trim()); }); if(colCos && baseDeCostos.length>0) baseDeCostos.forEach(f => { let m = f[colCos]; if(m) unicas.add(String(m).trim()); }); Array.from(unicas).sort().forEach(m => { sE.innerHTML += `<option value="${m}">${m}</option>`; }); }
 function sincronizarFrecYCostos() { const equipo = document.getElementById('critEquipoSelect').value; const periodo = document.getElementById('critPeriodo').value; const metodo = document.getElementById('critMetodoCalculo').value; const info = document.getElementById('critInfoAuto'); if(!equipo) { info.innerText = "Selecciona máquina."; return; } document.getElementById('critEquipo').value = equipo; const colMto = document.getElementById('critColMto').value; const colFecMto = document.getElementById('selectorColumnaFecha').value; let freq = 0; let mtoText = "0 fallos"; if(colMto && colFecMto && baseDeDatos.length>0) { let fallos = baseDeDatos.filter(f => String(f[colMto]).trim() === equipo); let perU = {}; fallos.forEach(f => { let fec = f[colFecMto]; if(fec) { let fs = String(fec); let pKey = ""; if(periodo === 'dia') pKey = fs; else if(periodo === 'mes') pKey = fs.substring(0,7); else if(periodo === 'anio') pKey = fs.substring(0,4); else if(periodo === 'semana') { let d = new Date(fs+"T12:00:00"); pKey = d.getFullYear()+"-"+Math.floor(d.getTime()/604800000); } if(pKey) perU[pKey] = (perU[pKey] || 0) + 1; } }); let arrF = Object.values(perU).sort((a,b)=>a-b); if(arrF.length === 0) arrF = [0]; if (metodo === 'promedio') freq = fallos.length / Math.max(1, arrF.length); else if (metodo === 'q0') freq = arrF[0]; else if (metodo === 'q1') freq = calcularPercentil(arrF, 25); else if (metodo === 'q2') freq = calcularPercentil(arrF, 50); else if (metodo === 'q3') freq = calcularPercentil(arrF, 75); else if (metodo === 'q4') freq = arrF[arrF.length-1]; mtoText = `${freq.toFixed(1)}/per`; let sFrec = document.getElementById('critFrec'); if (freq <= 1.5) sFrec.value = "1"; else if (freq > 1.5 && freq <= 4.5) sFrec.value = "2"; else if (freq > 4.5 && freq <= 7.5) sFrec.value = "3"; else sFrec.value = "4"; } const colCos = document.getElementById('critColBodega').value; const colValCos = document.getElementById('critColValorBodega').value; const colFecCos = document.getElementById('costoColFecha').value; let cost = 0; let cosText = "0"; let tc = obtenerTC(); let sim = obtenerSimboloMoneda(); if(colCos && colValCos && colFecCos && baseDeCostos.length>0) { let registros = baseDeCostos.filter(f => String(f[colCos]).trim() === equipo); let perUC = {}; registros.forEach(f => { let fec = f[colFecCos]; let valorDinero = (parsearMoneda(f[colValCos]) / tc); if(fec) { let fs = String(fec); let pKey = ""; if(periodo === 'dia') pKey = fs; else if(periodo === 'mes') pKey = fs.substring(0,7); else if(periodo === 'anio') pKey = fs.substring(0,4); else if(periodo === 'semana') { let d = new Date(fs+"T12:00:00"); pKey = d.getFullYear()+"-"+Math.floor(d.getTime()/604800000); } if(pKey) perUC[pKey] = (perUC[pKey] || 0) + valorDinero; } }); let arrC = Object.values(perUC).sort((a,b)=>a-b); if(arrC.length === 0) arrC = [0]; if (metodo === 'promedio') { let sumC = arrC.reduce((a,b)=>a+b,0); cost = sumC / Math.max(1, arrC.length); } else if (metodo === 'q0') cost = arrC[0]; else if (metodo === 'q1') cost = calcularPercentil(arrC, 25); else if (metodo === 'q2') cost = calcularPercentil(arrC, 50); else if (metodo === 'q3') cost = calcularPercentil(arrC, 75); else if (metodo === 'q4') cost = arrC[arrC.length-1]; cosText = `${sim} ${cost.toFixed(0)}/per`; let sCosto = document.getElementById('critCosto'); if (cost <= 5000) sCosto.value = "1"; else if (cost > 5000 && cost <= 10000) sCosto.value = "2"; else sCosto.value = "3"; } let lblM = document.getElementById('critMetodoCalculo').options[document.getElementById('critMetodoCalculo').selectedIndex].text; info.innerText = `Por ${periodo} (${lblM}): Frec: ${mtoText} | Gasto: ${cosText}.`; actualizarPreviewCriticidad(); }
 function calcularFormulaCriticidad(frec, imp, flex, costo, seg) { const consecuencia = (imp * flex) + costo + seg; const criticidad = frec * consecuencia; let nivel = ''; let color = ''; let badgeClase = ''; if (criticidad <= 40) { nivel = 'BAJO'; color = '#1e40af'; badgeClase = 'badge-bajo'; } else if (criticidad > 40 && criticidad <= 100) { nivel = 'MEDIO'; color = '#166534'; badgeClase = 'badge-medio'; } else { nivel = 'ALTO'; color = '#991b1b'; badgeClase = 'badge-alto'; } return { total: criticidad, nivel, color, badgeClase }; }
 function actualizarPreviewCriticidad() { const c = calcularFormulaCriticidad(parseInt(document.getElementById('critFrec').value), parseInt(document.getElementById('critImp').value), parseInt(document.getElementById('critFlex').value), parseInt(document.getElementById('critCosto').value), parseInt(document.getElementById('critSeguridad').value)); const p = document.getElementById('previewCriticidad'); document.getElementById('previewPuntos').innerText = c.total; document.getElementById('previewNivel').innerText = c.nivel; document.getElementById('previewPuntos').style.color = c.color; document.getElementById('previewNivel').style.color = c.color; if(c.nivel === 'BAJO') { p.style.background = '#dbeafe'; p.style.borderColor = '#93c5fd'; } else if(c.nivel === 'MEDIO') { p.style.background = '#dcfce3'; p.style.borderColor = '#86efac'; } else { p.style.background = '#fee2e2'; p.style.borderColor = '#fca5a5'; } }
-function guardarActivoCriticidad() {
-    const eq = document.getElementById('critEquipo').value.trim(); if (!eq) return alert("Ingresa equipo.");
-    const c = calcularFormulaCriticidad(parseInt(document.getElementById('critFrec').value), parseInt(document.getElementById('critImp').value), parseInt(document.getElementById('critFlex').value), parseInt(document.getElementById('critCosto').value), parseInt(document.getElementById('critSeguridad').value));
-    let existe = listaCriticidad.findIndex(i => i.equipo === eq);
-    let nObj = { id: new Date().getTime(), equipo: eq, frec: document.getElementById('critFrec').value, imp: document.getElementById('critImp').value, flex: document.getElementById('critFlex').value, costo: document.getElementById('critCosto').value, seg: document.getElementById('critSeguridad').value, total: c.total, nivel: c.nivel, badgeClase: c.badgeClase };
-    if(existe !== -1) listaCriticidad[existe] = nObj; else listaCriticidad.push(nObj);
-    guardarEstado('bd_criticidad', listaCriticidad); document.getElementById('critEquipo').value = ''; document.getElementById('critInfoAuto').innerText = ''; renderizarTablaCriticidad(); if(document.getElementById('panelJerarquia').style.display === 'block') renderizarJerarquia();
-}
+function guardarActivoCriticidad() { const eq = document.getElementById('critEquipo').value.trim(); if (!eq) return alert("Ingresa equipo."); const c = calcularFormulaCriticidad(parseInt(document.getElementById('critFrec').value), parseInt(document.getElementById('critImp').value), parseInt(document.getElementById('critFlex').value), parseInt(document.getElementById('critCosto').value), parseInt(document.getElementById('critSeguridad').value)); let existe = listaCriticidad.findIndex(i => i.equipo === eq); let nObj = { id: new Date().getTime(), equipo: eq, frec: document.getElementById('critFrec').value, imp: document.getElementById('critImp').value, flex: document.getElementById('critFlex').value, costo: document.getElementById('critCosto').value, seg: document.getElementById('critSeguridad').value, total: c.total, nivel: c.nivel, badgeClase: c.badgeClase }; if(existe !== -1) listaCriticidad[existe] = nObj; else listaCriticidad.push(nObj); guardarEstado('bd_criticidad', listaCriticidad); document.getElementById('critEquipo').value = ''; document.getElementById('critInfoAuto').innerText = ''; renderizarTablaCriticidad(); if(document.getElementById('panelJerarquia').style.display === 'block') renderizarJerarquia(); }
 function eliminarActivoCriticidad(id) { listaCriticidad = listaCriticidad.filter(i => i.id !== id); guardarEstado('bd_criticidad', listaCriticidad); renderizarTablaCriticidad(); }
 function renderizarTablaCriticidad() { const tb = document.getElementById('cuerpoTablaCriticidad'); tb.innerHTML = ''; if (listaCriticidad.length === 0) { tb.innerHTML = '<tr><td colspan="9" style="padding: 20px; color: #999;">No hay activos.</td></tr>'; return; } listaCriticidad.forEach(a => { tb.innerHTML += `<tr style="border-bottom: 1px solid #eee;"><td style="padding:8px;text-align:left;font-weight:bold;">${a.equipo}</td><td style="padding:8px;">${a.frec}</td><td style="padding:8px;">${a.imp}</td><td style="padding:8px;">${a.flex}</td><td style="padding:8px;">${a.costo}</td><td style="padding:8px;">${a.seg}</td><td style="padding:8px;font-weight:bold;">${a.total}</td><td style="padding:8px;"><span class="badge ${a.badgeClase}">${a.nivel}</span></td><td style="padding:8px;"><button onclick="eliminarActivoCriticidad(${a.id})" style="background:none;border:none;color:red;cursor:pointer;font-size:16px;">🗑️</button></td></tr>`; }); }
 
@@ -440,5 +441,25 @@ function exportarCSVMantenimiento() { if (baseDeDatos.length === 0) return alert
 function limpiarDatosMantenimiento() { if(!confirm("¿Borrar Mantenimiento?")) return; baseDeDatos = []; guardarEstado('bd_industrial', []); actualizarSelectoresGlobales(); actualizarSelectoresConexionCriticidad(); actualizarListasFiltrosSecundarios(); aplicarFiltro(); }
 function exportarCSVCostos() { if (baseDeCostos.length === 0) return alert("Sin datos."); let expFilt = confirm("¿Exportar SOLO datos visibles (filtrados)?\n[Aceptar] = Filtrados\n[Cancelar] = Toda la base"); let dExp = expFilt ? costosFiltrados : baseDeCostos; if (dExp.length === 0) return alert("No hay datos."); let c = Array.from(new Set(dExp.flatMap(Object.keys))); descargarArchivo(Papa.unparse(dExp, { columns: c }), `costos_bodega_${expFilt?'filtrado':'completo'}.csv`, 'text/csv'); }
 function limpiarDatosCostos() { if(!confirm("¿Borrar Costos?")) return; baseDeCostos = []; guardarEstado('bd_costos', []); actualizarSelectoresCostos(); actualizarSelectoresConexionCriticidad(); actualizarListasFiltrosSecundarios(); aplicarFiltro(); }
+
+// --- VALIDACION DE TIEMPOS ---
+function abrirModalValidarTiempos() { const sel = document.getElementById('validadorColTM'); sel.innerHTML = ''; if(baseDeDatos.length > 0) { const cols = Array.from(new Set(baseDeDatos.flatMap(Object.keys))).sort(); cols.forEach(c => sel.innerHTML += `<option value="${c}">${c}</option>`); let ideal = cols.find(c => c.toLowerCase().includes('tiempo') || c.toLowerCase().includes('muerto') || c.toLowerCase().includes('paro')); if(ideal) sel.value = ideal; } ejecutarValidacionTiempos(); document.getElementById('modalValidarTiempos').showModal(); }
+function ejecutarValidacionTiempos() {
+    const col = document.getElementById('validadorColTM').value; const tbody = document.getElementById('listaErroresTiempos'); tbody.innerHTML = ''; if(!col || baseDeDatos.length === 0) return;
+    let errores = 0;
+    baseDeDatos.forEach((f, idx) => {
+        let v = f[col];
+        if(v && String(v).trim() !== "") {
+            let s = String(v).toLowerCase().trim(); let valNum = parsearDuracion(v);
+            let looksLikeZero = (s === '0' || s === '0:00' || s === '0.0' || s === '00:00');
+            if (valNum === 0 && !looksLikeZero) {
+                errores++; tbody.innerHTML += `<tr><td style="padding:4px;">Registro #${idx+1}</td><td style="padding:4px; color:red; font-weight:bold;">${v}</td><td style="padding:4px;"><button onclick="document.getElementById('modalValidarTiempos').close(); cambiarPestana('datos'); abrirModalEdicion('mantenimiento', ${idx})" class="btn-chico">✏️ Editar</button></td></tr>`;
+            } else if (valNum > 100) {
+                errores++; tbody.innerHTML += `<tr><td style="padding:4px;">Registro #${idx+1}</td><td style="padding:4px; color:orange; font-weight:bold;">${v} (Anormal: ${formatoHorasMinutos(valNum)})</td><td style="padding:4px;"><button onclick="document.getElementById('modalValidarTiempos').close(); cambiarPestana('datos'); abrirModalEdicion('mantenimiento', ${idx})" class="btn-chico">✏️ Editar</button></td></tr>`;
+            }
+        }
+    });
+    if(errores === 0) tbody.innerHTML = '<tr><td colspan="3" style="text-align:center; padding:10px; color:green; font-weight:bold;">✅ Todos los datos de tiempo en esta columna tienen formato válido.</td></tr>';
+}
 
 arrancarSistema();
